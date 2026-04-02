@@ -16,6 +16,7 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from src.calibration import calibrate_camera, find_checkerboard_corners
 from src.config import CALIB_PATTERN_SIZE, CAMERA_MATRIX, OUTPUT_PATH
+from src.deep_depth import load_depth_model, predict_relative_depth
 from src.web_pipeline import CalibrationResult, PipelineResult, create_side_by_side, run_classical_pipeline
 
 register_heif_opener()
@@ -82,6 +83,12 @@ def _png_bytes(image: np.ndarray) -> bytes:
     return encoded.tobytes()
 
 
+@st.cache_resource(show_spinner=False)
+def _get_cached_depth_model():
+    """Load the deep depth model once per Streamlit process."""
+    return load_depth_model()
+
+
 def _render_upload_panel() -> None:
     st.header("Upload Data")
 
@@ -105,6 +112,8 @@ def _render_upload_panel() -> None:
         st.session_state["upload_signature"] = combined_sig
         st.session_state.pop("pipeline_result", None)
         st.session_state.pop("calibration_result", None)
+        st.session_state.pop("dl_depth_vis", None)
+        st.session_state.pop("dl_depth_sig", None)
 
     if len(stereo_files or []) != 2:
         st.warning("Exactly 2 stereo images are required.")
@@ -287,10 +296,33 @@ def _render_comparison_panel() -> None:
 
     with col3:
         st.caption("Deep Learning")
-        # Placeholder proxy: edge-preserving smoothing to mimic refined disparity.
-        deep_proxy = cv2.bilateralFilter(result.disparity_rectified, 7, 50, 50)
-        st.image(deep_proxy, use_container_width=True, clamp=True)
-        st.caption("Approximation placeholder for qualitative comparison.")
+        left_image = st.session_state.get("stereo_left")
+        if left_image is None:
+            st.warning("Upload stereo images to run deep depth estimation.")
+        else:
+            sig = st.session_state.get("upload_signature")
+            should_recompute = (
+                st.session_state.get("dl_depth_vis") is None
+                or st.session_state.get("dl_depth_sig") != sig
+            )
+            if should_recompute:
+                with st.spinner("Running Depth Anything on left image..."):
+                    try:
+                        processor, model = _get_cached_depth_model()
+                        st.session_state["dl_depth_vis"] = predict_relative_depth(
+                            left_image,
+                            processor,
+                            model,
+                        )
+                        st.session_state["dl_depth_sig"] = sig
+                    except Exception as exc:
+                        st.session_state["dl_depth_vis"] = None
+                        st.error(f"Deep model inference failed: {exc}")
+
+            dl_depth = st.session_state.get("dl_depth_vis")
+            if dl_depth is not None:
+                st.image(dl_depth, use_container_width=True, clamp=True)
+                st.caption("Deep learning depth is relative and not metric.")
 
     st.info("Rectification usually improves geometric consistency; learned refinement can further suppress local noise.")
 
@@ -397,6 +429,8 @@ def _init_state() -> None:
         "calibration_result": None,
         "pipeline_result": None,
         "upload_signature": None,
+        "dl_depth_vis": None,
+        "dl_depth_sig": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
