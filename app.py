@@ -11,6 +11,10 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
+try:
+    import plotly.graph_objects as go
+except Exception:
+    go = None
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -283,6 +287,49 @@ def _render_classical_pipeline_panel() -> None:
     d3.metric("Mean depth", f"{result.depth_mean:.3f}")
 
     st.subheader("3D Visualization")
+    st.write("Interactive dense point cloud preview (sampled for performance).")
+    if go is None:
+        st.warning("Plotly is not installed. Install it with: pip install plotly")
+    elif result.preview_points_xyz.size == 0:
+        st.warning("No valid dense 3D points available for preview.")
+    else:
+        max_n = int(len(result.preview_points_xyz))
+        n_show = st.slider(
+            "Preview points",
+            min_value=1000 if max_n >= 1000 else 100,
+            max_value=max_n,
+            value=min(5000, max_n),
+            step=500 if max_n >= 5000 else 100,
+        )
+
+        pts = result.preview_points_xyz[:n_show]
+        cols = result.preview_points_rgb[:n_show]
+        colors = [f"rgb({int(r)},{int(g)},{int(b)})" for r, g, b in cols]
+
+        fig = go.Figure(
+            data=[
+                go.Scatter3d(
+                    x=pts[:, 0],
+                    y=pts[:, 1],
+                    z=pts[:, 2],
+                    mode="markers",
+                    marker={"size": 2, "color": colors, "opacity": 0.8},
+                )
+            ]
+        )
+        fig.update_layout(
+            height=600,
+            margin={"l": 0, "r": 0, "b": 0, "t": 30},
+            scene={
+                "xaxis_title": "X",
+                "yaxis_title": "Y",
+                "zaxis_title": "Z",
+                "aspectmode": "data",
+            },
+            title="Point Cloud Preview",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
     st.write("Sparse 3D points (from triangulation) available for quick inspection.")
     if result.sparse_points.size > 0:
         st.write(f"Sparse points: {len(result.sparse_points)}")
