@@ -72,6 +72,8 @@ class PipelineResult:
     depth_p95: float
     depth_hist_counts: np.ndarray
     depth_hist_bin_centers: np.ndarray
+    preview_points_xyz: np.ndarray
+    preview_points_rgb: np.ndarray
     pointcloud_path: Path
     sparse_points: np.ndarray
 
@@ -219,6 +221,20 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         z_max=100.0,
     )
 
+    # Sample a subset for responsive in-app 3D preview.
+    z = points_3d_dense[:, :, 2]
+    preview_mask = np.isfinite(z) & (z > 0.0) & (z <= 100.0)
+    preview_points = points_3d_dense[preview_mask]
+    preview_colors_bgr = rect_left[preview_mask]
+    preview_colors_rgb = preview_colors_bgr[:, ::-1].astype(np.uint8)
+
+    max_preview_points = 12000
+    if len(preview_points) > max_preview_points:
+        rng = np.random.default_rng(seed=0)
+        idx = rng.choice(len(preview_points), size=max_preview_points, replace=False)
+        preview_points = preview_points[idx]
+        preview_colors_rgb = preview_colors_rgb[idx]
+
     sparse_points = triangulate_points(pts1_inliers, pts2_inliers, camera_matrix, R, t)
     if len(sparse_points) > 0:
         sparse_points = sparse_points[sparse_points[:, 2] > 0]
@@ -256,6 +272,8 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         depth_p95=depth_p95,
         depth_hist_counts=depth_hist_counts,
         depth_hist_bin_centers=depth_hist_bin_centers,
+        preview_points_xyz=preview_points.astype(np.float32),
+        preview_points_rgb=preview_colors_rgb,
         pointcloud_path=pointcloud_path,
         sparse_points=sparse_points,
     )
