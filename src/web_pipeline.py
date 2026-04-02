@@ -46,6 +46,10 @@ class PipelineResult:
     keypoints_right: int
     num_matches: int
     num_inliers: int
+    fundamental_matrix: np.ndarray
+    essential_matrix: np.ndarray
+    rotation_matrix: np.ndarray
+    translation_vector: np.ndarray
     match_visualization: np.ndarray
     rectified_left: np.ndarray
     rectified_right: np.ndarray
@@ -226,6 +230,10 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         keypoints_right=len(kp2),
         num_matches=len(matches),
         num_inliers=len(pts1_inliers),
+        fundamental_matrix=F,
+        essential_matrix=E,
+        rotation_matrix=R,
+        translation_vector=t,
         match_visualization=match_vis,
         rectified_left=rect_left,
         rectified_right=rect_right,

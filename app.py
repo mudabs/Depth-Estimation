@@ -252,6 +252,21 @@ def _render_classical_pipeline_panel() -> None:
     m3.metric("Matches", result.num_matches)
     m4.metric("Inliers", result.num_inliers)
 
+    st.subheader("Geometry Details")
+    st.caption("Internal geometric estimates used by the stereo pipeline.")
+
+    st.markdown("**F (Fundamental Matrix)** - epipolar geometry in image coordinates.")
+    st.code(np.array2string(result.fundamental_matrix, precision=6, suppress_small=False), language="text")
+
+    st.markdown("**E (Essential Matrix)** - calibrated geometry after applying camera intrinsics.")
+    st.code(np.array2string(result.essential_matrix, precision=6, suppress_small=False), language="text")
+
+    st.markdown("**R (Rotation Matrix)** - relative camera orientation from left to right view.")
+    st.code(np.array2string(result.rotation_matrix, precision=6, suppress_small=False), language="text")
+
+    st.markdown("**t (Translation Vector)** - relative camera motion direction (scale-ambiguous).")
+    st.code(np.array2string(result.translation_vector.reshape(-1, 1), precision=6, suppress_small=False), language="text")
+
     st.subheader("Rectification")
     rect_pair = create_side_by_side(result.rectified_left, result.rectified_right, "Rectified Left", "Rectified Right")
     st.image(_bgr_to_rgb(rect_pair), caption="Rectified stereo pair", use_container_width=True)
