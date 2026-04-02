@@ -63,6 +63,11 @@ class PipelineResult:
     depth_raw_valid_count: int
     depth_clean_valid_count: int
     depth_total_count: int
+    depth_p5: float
+    depth_p50: float
+    depth_p95: float
+    depth_hist_counts: np.ndarray
+    depth_hist_bin_centers: np.ndarray
     pointcloud_path: Path
     sparse_points: np.ndarray
 
@@ -172,10 +177,20 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         depth_min = 0.0
         depth_max = 0.0
         depth_mean = 0.0
+        depth_p5 = 0.0
+        depth_p50 = 0.0
+        depth_p95 = 0.0
+        depth_hist_counts = np.zeros(20, dtype=np.int64)
+        depth_hist_bin_centers = np.linspace(0, 1, 20, dtype=np.float32)
     else:
         depth_min = float(np.min(valid_depth))
         depth_max = float(np.max(valid_depth))
         depth_mean = float(np.mean(valid_depth))
+        depth_p5 = float(np.percentile(valid_depth, 5))
+        depth_p50 = float(np.percentile(valid_depth, 50))
+        depth_p95 = float(np.percentile(valid_depth, 95))
+        depth_hist_counts, bin_edges = np.histogram(valid_depth, bins=20)
+        depth_hist_bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
     clean_values = depth_clean[clean_mask]
     if clean_values.size == 0:
@@ -228,6 +243,11 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         depth_raw_valid_count=depth_raw_valid_count,
         depth_clean_valid_count=depth_clean_valid_count,
         depth_total_count=depth_total_count,
+        depth_p5=depth_p5,
+        depth_p50=depth_p50,
+        depth_p95=depth_p95,
+        depth_hist_counts=depth_hist_counts,
+        depth_hist_bin_centers=depth_hist_bin_centers,
         pointcloud_path=pointcloud_path,
         sparse_points=sparse_points,
     )

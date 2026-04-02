@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-import torch
-from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
 MODEL_ID = "LiheYoung/depth-anything-small-hf"
 
 
 def load_depth_model(model_id: str = MODEL_ID):
     """Load and return image processor and depth model."""
+    try:
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+    except ImportError as exc:
+        raise ImportError(
+            "Missing dependency 'transformers'. Install with: pip install transformers"
+        ) from exc
+
     processor = AutoImageProcessor.from_pretrained(model_id)
     model = AutoModelForDepthEstimation.from_pretrained(model_id)
     model.eval()
@@ -26,6 +31,11 @@ def predict_relative_depth(
     """Infer a relative depth map and return a uint8 visualization."""
     if bgr_image is None or bgr_image.size == 0:
         raise ValueError("Input image must be valid and non-empty.")
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError("Missing dependency 'torch'. Install with: pip install torch") from exc
 
     rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
