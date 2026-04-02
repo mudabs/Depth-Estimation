@@ -9,6 +9,7 @@ from typing import Iterable
 
 import cv2
 import numpy as np
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
@@ -338,12 +339,26 @@ def _render_comparison_panel() -> None:
     m5.metric("Clean Max", f"{result.depth_clean_max:.3f}")
     m6.metric("Clean Mean", f"{result.depth_clean_mean:.3f}")
 
+    p1, p2, p3 = st.columns(3)
+    p1.metric("P5", f"{result.depth_p5:.3f}")
+    p2.metric("P50 (Median)", f"{result.depth_p50:.3f}")
+    p3.metric("P95", f"{result.depth_p95:.3f}")
+
     raw_ratio = 100.0 * result.depth_raw_valid_count / max(1, result.depth_total_count)
     clean_ratio = 100.0 * result.depth_clean_valid_count / max(1, result.depth_total_count)
     q1, q2, q3 = st.columns(3)
     q1.metric("Raw Valid Pixels", f"{result.depth_raw_valid_count:,}")
     q2.metric("Clean Valid Pixels", f"{result.depth_clean_valid_count:,}")
     q3.metric("Coverage", f"raw {raw_ratio:.2f}% | clean {clean_ratio:.2f}%")
+
+    st.subheader("Depth Distribution Histogram")
+    hist_df = pd.DataFrame(
+        {
+            "depth": result.depth_hist_bin_centers,
+            "count": result.depth_hist_counts,
+        }
+    )
+    st.bar_chart(hist_df.set_index("depth"))
 
     if result.depth_raw_valid_count == 0:
         st.error("No positive finite depth pixels were found. Disparity is likely invalid for this pair.")
@@ -355,6 +370,11 @@ def _render_comparison_panel() -> None:
     elif abs(result.depth_max - result.depth_min) < 1e-6:
         st.warning(
             "Raw depth min/max are identical, which indicates a near-constant or degenerate depth estimate."
+        )
+
+    if raw_ratio < 1.0:
+        st.warning(
+            "Very low valid depth coverage (<1%). Depth reliability is poor for this image pair."
         )
 
     st.subheader("Failure Cases Panel")
