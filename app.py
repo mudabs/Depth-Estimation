@@ -87,18 +87,18 @@ def _png_bytes(image: np.ndarray) -> bytes:
     return encoded.tobytes()
 
 
-def _depth_values(depth: np.ndarray, *, max_depth: float | None = 10.0) -> np.ndarray:
-    """Return finite positive depth samples with optional upper-bound clipping."""
+def _depth_values(depth: np.ndarray, *, max_depth: float | None = None) -> np.ndarray:
+    """Return finite positive depth samples with optional upper-bound filtering."""
     values = np.asarray(depth, dtype=np.float32).ravel()
     values = values[np.isfinite(values)]
     values = values[values > 0]
     if max_depth is not None:
-        values = np.clip(values, 0.0, float(max_depth))
+        values = values[values < float(max_depth)]
     return values
 
 
 def _depth_summary(depth: np.ndarray) -> tuple[float | None, float | None, float | None]:
-    values = _depth_values(depth)
+    values = _depth_values(depth, max_depth=None)
     if values.size == 0:
         return None, None, None
     return float(values.min()), float(values.mean()), float(values.max())
