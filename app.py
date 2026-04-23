@@ -23,6 +23,7 @@ from src.calibration import calibrate_camera, find_checkerboard_corners
 from src.config import CALIB_PATTERN_SIZE, CAMERA_MATRIX, OUTPUT_PATH
 from src.crestereo_depth import compute_stereo_dl_disparity, load_stereo_dl_model
 from src.deep_depth import load_depth_model, predict_relative_depth_map
+from src.unimatch_depth import compute_unimatch_disparity, load_unimatch_model
 from src.web_pipeline import CalibrationResult, PipelineResult, create_side_by_side, run_classical_pipeline
 
 register_heif_opener()
@@ -146,6 +147,12 @@ def get_stereo_dl_model():
     return load_stereo_dl_model()
 
 
+@st.cache_resource(show_spinner=False)
+def get_unimatch_model():
+    """Load the UniMatch stereo model once per Streamlit process."""
+    return load_unimatch_model()
+
+
 def _render_upload_panel() -> None:
     st.header("Upload Data")
 
@@ -174,6 +181,9 @@ def _render_upload_panel() -> None:
         st.session_state.pop("stereo_dl_disp_raw", None)
         st.session_state.pop("stereo_dl_sig", None)
         st.session_state.pop("stereo_dl_status", None)
+        st.session_state.pop("unimatch_disp_raw", None)
+        st.session_state.pop("unimatch_sig", None)
+        st.session_state.pop("unimatch_status", None)
 
     if len(stereo_files or []) != 2:
         st.warning("Exactly 2 stereo images are required.")
@@ -547,7 +557,7 @@ def _render_comparison_panel() -> None:
             dl_depth_metric = np.asarray(dl_depth_raw, dtype=np.float32) * scale
 
     stereo_dl_depth = None
-    stereo_dl_note = "Stereo DL uses learned matching and may improve results in low-texture regions."
+    stereo_dl_note = "Stereo DL (CREStereo) uses learned matching and may improve results in low-texture regions."
     if left_image is not None and right_image is not None:
         stereo_dl_sig = st.session_state.get("upload_signature")
         should_recompute_stereo_dl = (
@@ -583,6 +593,43 @@ def _render_comparison_panel() -> None:
                 result.baseline_meters,
             )
 
+    unimatch_depth = None
+    unimatch_note = "UniMatch is a learned stereo matcher and can improve fine detail and low-texture regions."
+    if left_image is not None and right_image is not None:
+        unimatch_sig = st.session_state.get("upload_signature")
+        should_recompute_unimatch = (
+            st.session_state.get("unimatch_status") != "unavailable"
+            and (
+                st.session_state.get("unimatch_disp_raw") is None
+                or st.session_state.get("unimatch_sig") != unimatch_sig
+            )
+        )
+        if should_recompute_unimatch:
+            try:
+                with st.spinner("Running UniMatch on stereo pair..."):
+                    model = get_unimatch_model()
+                    st.session_state["unimatch_disp_raw"] = compute_unimatch_disparity(
+                        left_image,
+                        right_image,
+                        model,
+                    )
+                    st.session_state["unimatch_sig"] = unimatch_sig
+                    st.session_state["unimatch_status"] = "available"
+            except Exception as exc:
+                st.session_state["unimatch_disp_raw"] = None
+                st.session_state["unimatch_sig"] = unimatch_sig
+                st.session_state["unimatch_status"] = "unavailable"
+                st.warning("UniMatch failed to run.")
+                print(exc)
+
+        unimatch_disp_raw = st.session_state.get("unimatch_disp_raw")
+        if unimatch_disp_raw is not None:
+            unimatch_depth = _depth_from_disparity(
+                unimatch_disp_raw,
+                result.focal_length_px,
+                result.baseline_meters,
+            )
+
     def _render_depth_card(
         column,
         title: str,
@@ -603,33 +650,47 @@ def _render_comparison_panel() -> None:
             if note:
                 st.caption(note)
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
+
     _render_depth_card(
         col1,
         "Uncalibrated Stereo",
         uncalibrated_depth,
         _depth_to_colormap(uncalibrated_depth),
+        note="Uses stereo matching without calibration. Depth is inconsistent and not reliable in scale.",
     )
+
     _render_depth_card(
         col2,
         "Calibrated Stereo",
         calibrated_depth,
         _depth_to_colormap(calibrated_depth),
+        note="Uses calibrated stereo geometry. Produces metric depth but may contain noise and missing regions.",
     )
+
     _render_depth_card(
         col3,
-        "Deep Learning (Estimated)",
-        dl_depth_metric if dl_depth_metric is not None else np.array([], dtype=np.float32),
-        _depth_to_colormap(dl_depth_metric) if dl_depth_metric is not None else None,
-        note="Depth values are scaled estimates based on stereo calibration and may not be perfectly accurate.",
-    )
-    _render_depth_card(
-        col4,
-        "Stereo DL (Learned Matching)",
+        "Enhanced Stereo (WLS Filtered)",
         stereo_dl_depth if stereo_dl_depth is not None else np.array([], dtype=np.float32),
         _depth_to_colormap(stereo_dl_depth) if stereo_dl_depth is not None else None,
-        note=stereo_dl_note if stereo_dl_depth is not None else None,
+        note="Applies edge-preserving WLS filtering to refine stereo results. Reduces noise and improves surface consistency.",
     )
+
+    _render_depth_card(
+        col4,
+        "Stereo DL (UniMatch)",
+        unimatch_depth if unimatch_depth is not None else np.array([], dtype=np.float32),
+        _depth_to_colormap(unimatch_depth) if unimatch_depth is not None else None,
+        note="Uses a deep learning stereo model for pixel matching. Produces smoother and more complete depth than classical methods.",
+    )
+
+    _render_depth_card(
+        col5,
+        "Monocular DL (Depth Anything)",
+        dl_depth_metric if dl_depth_metric is not None else np.array([], dtype=np.float32),
+        _depth_to_colormap(dl_depth_metric) if dl_depth_metric is not None else None,
+        note="Estimates depth from a single image using deep learning. Produces smooth results but lacks true metric scale.",
+    )   
 
 
 def _render_download_panel() -> None:

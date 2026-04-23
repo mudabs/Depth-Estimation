@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from src.crestereo_depth import compute_stereo_dl_disparity, load_stereo_dl_model
+from src.unimatch_depth import compute_unimatch_disparity, load_unimatch_model
 
 
 def compute_sgbm(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -66,10 +67,24 @@ def compute_crestereo(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, n
     return raw.astype(np.float32), disp_norm.astype(np.uint8)
 
 
+def compute_unimatch(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a UniMatch disparity map and a display visualization."""
+    model = _get_cached_unimatch_model()
+    raw = compute_unimatch_disparity(img1, img2, model)
+    disp_norm = cv2.normalize(raw, None, 0, 255, cv2.NORM_MINMAX)
+    return raw.astype(np.float32), disp_norm.astype(np.uint8)
+
+
 @lru_cache(maxsize=1)
 def _get_cached_crestereo_model():
     """Load the stereo DL model once for non-Streamlit callers."""
     return load_stereo_dl_model()
+
+
+@lru_cache(maxsize=1)
+def _get_cached_unimatch_model():
+    """Load the UniMatch stereo model once for non-Streamlit callers."""
+    return load_unimatch_model()
 
 
 def compute_disparity(
@@ -99,4 +114,6 @@ def compute_disparity(
         return compute_sgbm(left_image, right_image)
     if method_name in {"crestereo", "stereo_dl"}:
         return compute_crestereo(left_image, right_image)
+    if method_name in {"unimatch", "uni_match"}:
+        return compute_unimatch(left_image, right_image)
     raise ValueError(f"Unsupported disparity method: {method_name}")
