@@ -546,8 +546,8 @@ def _render_comparison_panel() -> None:
             scale = calibrated_mean / dl_mean
             dl_depth_metric = np.asarray(dl_depth_raw, dtype=np.float32) * scale
 
-    unimatch_depth = None
-    unimatch_note = "Stereo DL uses learned matching and may improve results in low-texture regions."
+    stereo_dl_depth = None
+    stereo_dl_note = "Stereo DL uses learned matching and may improve results in low-texture regions."
     if left_image is not None and right_image is not None:
         stereo_dl_sig = st.session_state.get("upload_signature")
         should_recompute_stereo_dl = (
@@ -577,7 +577,7 @@ def _render_comparison_panel() -> None:
 
         stereo_dl_disp_raw = st.session_state.get("stereo_dl_disp_raw")
         if stereo_dl_disp_raw is not None:
-            unimatch_depth = _depth_from_disparity(
+            stereo_dl_depth = _depth_from_disparity(
                 stereo_dl_disp_raw,
                 result.focal_length_px,
                 result.baseline_meters,
@@ -626,9 +626,9 @@ def _render_comparison_panel() -> None:
     _render_depth_card(
         col4,
         "Stereo DL (Learned Matching)",
-        unimatch_depth if unimatch_depth is not None else np.array([], dtype=np.float32),
-        _depth_to_colormap(unimatch_depth) if unimatch_depth is not None else None,
-        note=unimatch_note if unimatch_depth is not None else None,
+        stereo_dl_depth if stereo_dl_depth is not None else np.array([], dtype=np.float32),
+        _depth_to_colormap(stereo_dl_depth) if stereo_dl_depth is not None else None,
+        note=stereo_dl_note if stereo_dl_depth is not None else None,
     )
 
 
