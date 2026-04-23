@@ -42,6 +42,12 @@ class CalibrationResult:
 class PipelineResult:
     """Container for classical stereo pipeline outputs."""
 
+    # Pipeline settings
+    baseline_meters: float
+    use_metric_scaling: bool
+    focal_length_px: float
+
+    # Feature matching
     keypoints_left: int
     keypoints_right: int
     num_matches: int
@@ -51,16 +57,26 @@ class PipelineResult:
     rotation_matrix: np.ndarray
     translation_vector: np.ndarray
     match_visualization: np.ndarray
+
+    # Rectification & disparity
     rectified_left: np.ndarray
     rectified_right: np.ndarray
+    disparity_unrectified_raw: np.ndarray
     disparity_unrectified: np.ndarray
     disparity_rectified: np.ndarray
+    disparity_min: float
+    disparity_max: float
+    disparity_mean: float
+
+    # Depth outputs
     depth_raw_vis: np.ndarray
     depth_clean_vis: np.ndarray
+    depth_colored: np.ndarray          # colormap visualization
     depth_failure_mask: np.ndarray
     depth_min: float
     depth_max: float
     depth_mean: float
+    depth_median: float
     depth_clean_min: float
     depth_clean_max: float
     depth_clean_mean: float
@@ -72,6 +88,13 @@ class PipelineResult:
     depth_p95: float
     depth_hist_counts: np.ndarray
     depth_hist_bin_centers: np.ndarray
+    depth_map_raw: np.ndarray          # full float32 depth for pixel query
+    disparity_map_raw: np.ndarray      # full float32 disparity for pixel query
+    disparity_valid_pct: float         # % of pixels with valid disparity
+    confidence_map: np.ndarray         # uint8 255=valid, 0=invalid
+    auto_tune_suggestion: str          # advisory string from quality checks
+
+    # 3D
     preview_points_xyz: np.ndarray
     preview_points_rgb: np.ndarray
     pointcloud_path: Path
@@ -114,8 +137,18 @@ def create_side_by_side(left: np.ndarray, right: np.ndarray, left_label: str, ri
     return np.hstack([left_labeled, right_labeled])
 
 
-def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, camera_matrix: np.ndarray) -> PipelineResult:
-    """Run the existing classical stereo pipeline and return display-ready outputs."""
+def run_classical_pipeline(
+    left_image: np.ndarray,
+    right_image: np.ndarray,
+    camera_matrix: np.ndarray,
+    baseline_meters: float = 0.10,
+    use_metric_scaling: bool = True,
+) -> PipelineResult:
+    """Run the classical stereo pipeline and return display-ready outputs.
+
+    When *use_metric_scaling* is True the unit-translation from recoverPose()
+    is multiplied by *baseline_meters* so that resulting depth is in meters.
+    """
     kp1, desc1 = detect_and_compute(left_image, method="ORB")
     kp2, desc2 = detect_and_compute(right_image, method="ORB")
 
@@ -141,24 +174,52 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
     if R is None or t is None:
         raise RuntimeError("Failed to recover camera pose from the essential matrix.")
 
+    # Scale translation by baseline so depth is in real-world meters.
+    if use_metric_scaling and baseline_meters > 0:
+        t_scaled = t.astype(np.float64) * float(baseline_meters)
+    else:
+        t_scaled = t.astype(np.float64)
+
     image_size = (left_image.shape[1], left_image.shape[0])
-    R1, R2, P1, P2, Q = compute_rectification(camera_matrix, R, t, image_size)
+    R1, R2, P1, P2, Q = compute_rectification(camera_matrix, R, t_scaled, image_size)
     rect_left, rect_right = rectify_images(left_image, right_image, camera_matrix, R1, R2, P1, P2)
 
     _raw_unrect, disparity_unrect = compute_disparity(left_image, right_image)
     raw_disparity, disparity_rect = compute_disparity(rect_left, rect_right)
 
+    # Disparity: mask invalid pixels (≤0) before using for depth
+    invalid_disp_mask = raw_disparity <= 0
+    disp_positive = raw_disparity[~invalid_disp_mask]
+    if disp_positive.size > 0:
+        disparity_min = float(np.min(disp_positive))
+        disparity_max = float(np.max(disp_positive))
+        disparity_mean = float(np.mean(disp_positive))
+        disparity_valid_pct = 100.0 * disp_positive.size / max(1, raw_disparity.size)
+    else:
+        disparity_min = 0.0
+        disparity_max = 0.0
+        disparity_mean = 0.0
+        disparity_valid_pct = 0.0
+
+    # Confidence map: white = valid disparity, black = invalid
+    confidence_map = np.where(raw_disparity > 1.0, np.uint8(255), np.uint8(0))
+
     points_3d_dense = cv2.reprojectImageTo3D(raw_disparity, Q)
-    depth_map = points_3d_dense[:, :, 2]
+    depth_map = points_3d_dense[:, :, 2].astype(np.float32)
 
-    depth_raw_for_vis = depth_map.copy()
-    depth_raw_for_vis[~np.isfinite(depth_raw_for_vis)] = 0
-    depth_raw_vis = cv2.normalize(depth_raw_for_vis, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    # Stabilize: zero out invalid-disparity regions, non-finite values, then clamp + smooth
+    depth_map[invalid_disp_mask] = 0.0
+    depth_map[~np.isfinite(depth_map)] = 0.0
+    depth_map = np.clip(depth_map, 0.0, 10.0)  # assume indoor scene ≤ 10 m
+    depth_map = cv2.medianBlur(depth_map, 5)
 
-    valid_depth_mask = np.isfinite(depth_map) & (depth_map > 0)
+    # Raw depth visualization (grayscale normalize)
+    depth_raw_vis = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    valid_depth_mask = depth_map > 0
     valid_depth_values = depth_map[valid_depth_mask]
 
-    # Robust cleaned depth: keep only central percentile band of positive finite depths.
+    # Robust cleaned depth: filter outer 1% of positive depth values
     depth_clean = np.zeros_like(depth_map, dtype=np.float32)
     clean_mask = np.zeros_like(valid_depth_mask, dtype=bool)
     if valid_depth_values.size >= 20:
@@ -167,22 +228,25 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         if hi > lo:
             clean_mask = valid_depth_mask & (depth_map >= lo) & (depth_map <= hi)
     elif valid_depth_values.size > 0:
-        # For tiny valid sets, keep positives as-is.
         clean_mask = valid_depth_mask
 
     depth_clean[clean_mask] = depth_map[clean_mask]
     depth_clean_vis = cv2.normalize(depth_clean, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    invalid_mask = ~valid_depth_mask
-    depth_failure_mask = np.zeros(depth_map.shape, dtype=np.uint8)
-    depth_failure_mask[invalid_mask] = 255
+    # Colormap: clip to 10 m range, apply Inferno
+    depth_for_color = np.clip(depth_clean, 0.0, 10.0)
+    depth_norm_color = cv2.normalize(depth_for_color, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    depth_colored = cv2.applyColorMap(depth_norm_color, cv2.COLORMAP_INFERNO)
 
-    # Use all positive finite depths for stats to avoid frequent all-zero outputs.
+    # Failure mask: invalid depth → white
+    depth_failure_mask = np.where(valid_depth_mask, np.uint8(0), np.uint8(255))
+
     valid_depth = valid_depth_values
     if valid_depth.size == 0:
         depth_min = 0.0
         depth_max = 0.0
         depth_mean = 0.0
+        depth_median = 0.0
         depth_p5 = 0.0
         depth_p50 = 0.0
         depth_p95 = 0.0
@@ -192,6 +256,7 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         depth_min = float(np.min(valid_depth))
         depth_max = float(np.max(valid_depth))
         depth_mean = float(np.mean(valid_depth))
+        depth_median = float(np.median(valid_depth))
         depth_p5 = float(np.percentile(valid_depth, 5))
         depth_p50 = float(np.percentile(valid_depth, 50))
         depth_p95 = float(np.percentile(valid_depth, 95))
@@ -212,18 +277,37 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
     depth_clean_valid_count = int(clean_values.size)
     depth_total_count = int(depth_map.size)
 
+    # Auto-tune suggestion based on disparity/depth quality
+    if disparity_valid_pct < 10.0:
+        auto_tune_suggestion = (
+            "Suggested: increase numDisparities to 320 — disparity coverage is very low "
+            f"({disparity_valid_pct:.1f}% valid)."
+        )
+    elif depth_mean > 20.0 and use_metric_scaling:
+        auto_tune_suggestion = (
+            "Suggested: check baseline value or increase numDisparities to 320 — "
+            f"mean depth ({depth_mean:.1f} m) is unrealistically large."
+        )
+    elif disparity_mean < 5.0 and disparity_valid_pct > 10.0:
+        auto_tune_suggestion = (
+            "Suggested: decrease uniquenessRatio (try 5) — low mean disparity may indicate "
+            "over-strict uniqueness filtering."
+        )
+    else:
+        auto_tune_suggestion = ""
+
     pointcloud_path = OUTPUT_PATH / "pointcloud" / "scene.ply"
     export_colored_pointcloud_from_depth(
         points_3d_dense,
         rect_left,
         pointcloud_path,
         z_min=0.0,
-        z_max=100.0,
+        z_max=10.0,
     )
 
     # Sample a subset for responsive in-app 3D preview.
     z = points_3d_dense[:, :, 2]
-    preview_mask = np.isfinite(z) & (z > 0.0) & (z <= 100.0)
+    preview_mask = np.isfinite(z) & (z > 0.0) & (z <= 10.0)
     preview_points = points_3d_dense[preview_mask]
     preview_colors_bgr = rect_left[preview_mask]
     preview_colors_rgb = preview_colors_bgr[:, ::-1].astype(np.uint8)
@@ -235,13 +319,18 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         preview_points = preview_points[idx]
         preview_colors_rgb = preview_colors_rgb[idx]
 
-    sparse_points = triangulate_points(pts1_inliers, pts2_inliers, camera_matrix, R, t)
+    sparse_points = triangulate_points(pts1_inliers, pts2_inliers, camera_matrix, R, t_scaled)
     if len(sparse_points) > 0:
         sparse_points = sparse_points[sparse_points[:, 2] > 0]
 
     match_vis = draw_matches(left_image, right_image, kp1, kp2, inlier_matches)
 
+    focal_length_px = float(camera_matrix[0, 0])
+
     return PipelineResult(
+        baseline_meters=float(baseline_meters),
+        use_metric_scaling=use_metric_scaling,
+        focal_length_px=focal_length_px,
         keypoints_left=len(kp1),
         keypoints_right=len(kp2),
         num_matches=len(matches),
@@ -249,18 +338,24 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         fundamental_matrix=F,
         essential_matrix=E,
         rotation_matrix=R,
-        translation_vector=t,
+        translation_vector=t_scaled,
         match_visualization=match_vis,
         rectified_left=rect_left,
         rectified_right=rect_right,
+        disparity_unrectified_raw=_raw_unrect.astype(np.float32),
         disparity_unrectified=disparity_unrect,
         disparity_rectified=disparity_rect,
+        disparity_min=disparity_min,
+        disparity_max=disparity_max,
+        disparity_mean=disparity_mean,
         depth_raw_vis=depth_raw_vis,
         depth_clean_vis=depth_clean_vis,
+        depth_colored=depth_colored,
         depth_failure_mask=depth_failure_mask,
         depth_min=depth_min,
         depth_max=depth_max,
         depth_mean=depth_mean,
+        depth_median=depth_median,
         depth_clean_min=depth_clean_min,
         depth_clean_max=depth_clean_max,
         depth_clean_mean=depth_clean_mean,
@@ -272,6 +367,11 @@ def run_classical_pipeline(left_image: np.ndarray, right_image: np.ndarray, came
         depth_p95=depth_p95,
         depth_hist_counts=depth_hist_counts,
         depth_hist_bin_centers=depth_hist_bin_centers,
+        depth_map_raw=depth_map.astype(np.float32),
+        disparity_map_raw=raw_disparity.astype(np.float32),
+        disparity_valid_pct=disparity_valid_pct,
+        confidence_map=confidence_map,
+        auto_tune_suggestion=auto_tune_suggestion,
         preview_points_xyz=preview_points.astype(np.float32),
         preview_points_rgb=preview_colors_rgb,
         pointcloud_path=pointcloud_path,

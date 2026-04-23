@@ -23,12 +23,12 @@ def load_depth_model(model_id: str = MODEL_ID):
     return processor, model
 
 
-def predict_relative_depth(
+def predict_relative_depth_map(
     bgr_image: np.ndarray,
     processor,
     model,
 ) -> np.ndarray:
-    """Infer a relative depth map and return a uint8 visualization."""
+    """Infer a relative depth map and return the raw float32 values."""
     if bgr_image is None or bgr_image.size == 0:
         raise ValueError("Input image must be valid and non-empty.")
 
@@ -56,6 +56,15 @@ def predict_relative_depth(
     ).squeeze()
 
     depth = pred.detach().cpu().numpy()
-    depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    return np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def predict_relative_depth(
+    bgr_image: np.ndarray,
+    processor,
+    model,
+) -> np.ndarray:
+    """Infer a relative depth map and return a uint8 visualization."""
+    depth = predict_relative_depth_map(bgr_image, processor, model)
     depth_vis = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX)
     return depth_vis.astype(np.uint8)

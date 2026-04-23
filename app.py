@@ -9,7 +9,6 @@ from typing import Iterable
 
 import cv2
 import numpy as np
-import pandas as pd
 import streamlit as st
 try:
     import plotly.graph_objects as go
@@ -21,7 +20,7 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from src.calibration import calibrate_camera, find_checkerboard_corners
 from src.config import CALIB_PATTERN_SIZE, CAMERA_MATRIX, OUTPUT_PATH
-from src.deep_depth import load_depth_model, predict_relative_depth
+from src.deep_depth import load_depth_model, predict_relative_depth_map
 from src.web_pipeline import CalibrationResult, PipelineResult, create_side_by_side, run_classical_pipeline
 
 register_heif_opener()
@@ -88,6 +87,49 @@ def _png_bytes(image: np.ndarray) -> bytes:
     return encoded.tobytes()
 
 
+def _sanitize_depth_values(depth: np.ndarray, clip_max: float = 10.0) -> np.ndarray:
+    """Return finite positive depth samples clipped to a display range."""
+    values = np.asarray(depth, dtype=np.float32).ravel()
+    values = values[np.isfinite(values)]
+    values = values[values > 0]
+    if clip_max is not None:
+        values = np.clip(values, 0.0, clip_max)
+    return values
+
+
+def _depth_summary(depth: np.ndarray, clip_max: float = 10.0) -> tuple[float | None, float | None, float | None]:
+    values = _sanitize_depth_values(depth, clip_max=clip_max)
+    if values.size == 0:
+        return None, None, None
+    return float(values.min()), float(values.mean()), float(values.max())
+
+
+def _depth_from_disparity(disparity: np.ndarray, focal_length_px: float, baseline_meters: float) -> np.ndarray:
+    """Convert disparity values to approximate metric depth."""
+    disp = np.asarray(disparity, dtype=np.float32)
+    depth = np.zeros_like(disp, dtype=np.float32)
+    valid = np.isfinite(disp) & (disp > 0)
+    if np.any(valid):
+        depth[valid] = (float(focal_length_px) * float(baseline_meters)) / disp[valid]
+    return depth
+
+
+def _depth_to_colormap(depth: np.ndarray, clip_max: float = 10.0) -> np.ndarray:
+    """Render depth values with a simple inferno colormap."""
+    depth_vis = np.asarray(depth, dtype=np.float32)
+    depth_vis = np.where(np.isfinite(depth_vis) & (depth_vis > 0), depth_vis, 0.0)
+    depth_vis = np.clip(depth_vis, 0.0, clip_max)
+    if np.any(depth_vis > 0):
+        norm = cv2.normalize(depth_vis, None, 0, 255, cv2.NORM_MINMAX)
+    else:
+        norm = np.zeros_like(depth_vis, dtype=np.float32)
+    return cv2.applyColorMap(norm.astype(np.uint8), cv2.COLORMAP_INFERNO)
+
+
+def _format_depth_metric(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2f} m"
+
+
 @st.cache_resource(show_spinner=False)
 def _get_cached_depth_model():
     """Load the deep depth model once per Streamlit process."""
@@ -117,7 +159,7 @@ def _render_upload_panel() -> None:
         st.session_state["upload_signature"] = combined_sig
         st.session_state.pop("pipeline_result", None)
         st.session_state.pop("calibration_result", None)
-        st.session_state.pop("dl_depth_vis", None)
+        st.session_state.pop("dl_depth_raw", None)
         st.session_state.pop("dl_depth_sig", None)
 
     if len(stereo_files or []) != 2:
@@ -220,6 +262,27 @@ def _render_calibration_panel() -> None:
 def _render_classical_pipeline_panel() -> None:
     st.header("Classical Pipeline")
 
+    # --- Baseline & metric toggle ---
+    col_b1, col_b2 = st.columns([2, 1])
+    with col_b1:
+        baseline_meters = st.number_input(
+            "Baseline (meters)",
+            min_value=0.01,
+            max_value=0.50,
+            value=st.session_state.get("baseline", 0.10),
+            step=0.01,
+            format="%.2f",
+            help="Physical distance between stereo camera centers in meters.",
+        )
+        st.session_state["baseline"] = baseline_meters
+    with col_b2:
+        use_metric = st.toggle(
+            "Use metric scaling (baseline)",
+            value=st.session_state.get("use_metric_scaling", True),
+            help="ON = depth in meters using baseline. OFF = relative depth (unit translation).",
+        )
+        st.session_state["use_metric_scaling"] = use_metric
+
     if st.button("Run Classical Pipeline", type="primary"):
         left = st.session_state.get("stereo_left")
         right = st.session_state.get("stereo_right")
@@ -236,7 +299,13 @@ def _render_classical_pipeline_panel() -> None:
 
         with st.spinner("Running full classical stereo pipeline..."):
             try:
-                result = run_classical_pipeline(left, right, camera_matrix)
+                result = run_classical_pipeline(
+                    left,
+                    right,
+                    camera_matrix,
+                    baseline_meters=float(baseline_meters),
+                    use_metric_scaling=use_metric,
+                )
                 st.session_state["pipeline_result"] = result
                 st.success("Pipeline completed.")
             except Exception as exc:
@@ -248,6 +317,19 @@ def _render_classical_pipeline_panel() -> None:
         st.info("Run the classical pipeline to view outputs.")
         return
 
+    unit = "m" if result.use_metric_scaling else "(relative)"
+    st.info(
+        f"Depth summaries below are shown in meters using baseline = {result.baseline_meters:.2f} meters. "
+        f"Metric scaling inside the pipeline: {'ON' if result.use_metric_scaling else 'OFF'}."
+    )
+
+    # --- Validation Warnings ---
+    _render_validation_warnings(result)
+
+    # --- Auto-tune Suggestion ---
+    if result.auto_tune_suggestion:
+        st.info(f"🔧 {result.auto_tune_suggestion}")
+
     st.subheader("Feature Matching")
     st.image(_bgr_to_rgb(result.match_visualization), caption="ORB inlier matches", use_container_width=True)
     m1, m2, m3, m4 = st.columns(4)
@@ -256,21 +338,6 @@ def _render_classical_pipeline_panel() -> None:
     m3.metric("Matches", result.num_matches)
     m4.metric("Inliers", result.num_inliers)
 
-    st.subheader("Geometry Details")
-    st.caption("Internal geometric estimates used by the stereo pipeline.")
-
-    st.markdown("**F (Fundamental Matrix)** - epipolar geometry in image coordinates.")
-    st.code(np.array2string(result.fundamental_matrix, precision=6, suppress_small=False), language="text")
-
-    st.markdown("**E (Essential Matrix)** - calibrated geometry after applying camera intrinsics.")
-    st.code(np.array2string(result.essential_matrix, precision=6, suppress_small=False), language="text")
-
-    st.markdown("**R (Rotation Matrix)** - relative camera orientation from left to right view.")
-    st.code(np.array2string(result.rotation_matrix, precision=6, suppress_small=False), language="text")
-
-    st.markdown("**t (Translation Vector)** - relative camera motion direction (scale-ambiguous).")
-    st.code(np.array2string(result.translation_vector.reshape(-1, 1), precision=6, suppress_small=False), language="text")
-
     st.subheader("Rectification")
     rect_pair = create_side_by_side(result.rectified_left, result.rectified_right, "Rectified Left", "Rectified Right")
     st.image(_bgr_to_rgb(rect_pair), caption="Rectified stereo pair", use_container_width=True)
@@ -278,16 +345,38 @@ def _render_classical_pipeline_panel() -> None:
     st.subheader("Disparity Map")
     st.image(result.disparity_rectified, caption="Brighter = closer, darker = farther", use_container_width=True, clamp=True)
 
+    # --- Depth Visualization ---
     st.subheader("Depth Map")
-    st.image(result.depth_clean_vis, caption="Filtered depth map", use_container_width=True, clamp=True)
-    st.caption("Depth stats below are computed from positive finite depth values.")
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Min depth", f"{result.depth_min:.3f}")
-    d2.metric("Max depth", f"{result.depth_max:.3f}")
-    d3.metric("Mean depth", f"{result.depth_mean:.3f}")
+    calibrated_depth = _depth_from_disparity(result.disparity_map_raw, result.focal_length_px, result.baseline_meters)
+    st.image(_depth_to_colormap(calibrated_depth), caption="Calibrated stereo depth clipped to 0-10 m", use_container_width=True)
+    calib_min, calib_mean, calib_max = _depth_summary(calibrated_depth)
+    depth_cols = st.columns(3)
+    depth_cols[0].metric("Min Depth", _format_depth_metric(calib_min))
+    depth_cols[1].metric("Mean Depth", _format_depth_metric(calib_mean))
+    depth_cols[2].metric("Max Depth", _format_depth_metric(calib_max))
 
+    # --- Pixel depth query ---
+    st.subheader("Pixel Depth Query")
+    st.caption("Enter pixel coordinates to read depth and disparity at that location.")
+    qc1, qc2 = st.columns(2)
+    with qc1:
+        px_x = st.number_input("X (column)", min_value=0, max_value=max(0, result.depth_map_raw.shape[1] - 1), value=result.depth_map_raw.shape[1] // 2)
+    with qc2:
+        px_y = st.number_input("Y (row)", min_value=0, max_value=max(0, result.depth_map_raw.shape[0] - 1), value=result.depth_map_raw.shape[0] // 2)
+    dval = calibrated_depth[int(px_y), int(px_x)]
+    dispval = result.disparity_map_raw[int(px_y), int(px_x)]
+    is_confident = bool(result.confidence_map[int(px_y), int(px_x)] > 0)
+    if np.isfinite(dval) and dval > 0:
+        conf_label = "valid" if is_confident else "low confidence"
+        st.success(
+            f"Pixel ({int(px_x)}, {int(px_y)}) → Depth: {dval:.4f} m | "
+            f"Disparity: {dispval:.2f} px | Confidence: {conf_label}"
+        )
+    else:
+        st.warning(f"Pixel ({int(px_x)}, {int(px_y)}) → No valid depth (invalid/occluded)")
+
+    # --- 3D Visualization ---
     st.subheader("3D Visualization")
-    st.write("Interactive dense point cloud preview (sampled for performance).")
     if go is None:
         st.warning("Plotly is not installed. Install it with: pip install plotly")
     elif result.preview_points_xyz.size == 0:
@@ -321,21 +410,62 @@ def _render_classical_pipeline_panel() -> None:
             height=600,
             margin={"l": 0, "r": 0, "b": 0, "t": 30},
             scene={
-                "xaxis_title": "X",
-                "yaxis_title": "Y",
-                "zaxis_title": "Z",
+                "xaxis_title": f"X ({unit})",
+                "yaxis_title": f"Y ({unit})",
+                "zaxis_title": f"Z ({unit})",
                 "aspectmode": "data",
             },
             title="Point Cloud Preview",
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    st.write("Sparse 3D points (from triangulation) available for quick inspection.")
+    # --- Debug Panel ---
+    with st.expander("Debug Panel", expanded=False):
+        st.caption("Internal diagnostics.")
+
+        db1, db2, db3 = st.columns(3)
+        db1.metric("Baseline (m)", f"{result.baseline_meters:.3f}")
+        db2.metric("Focal Length (px)", f"{result.focal_length_px:.1f}")
+        db3.metric("Metric Scaling", "ON" if result.use_metric_scaling else "OFF")
+
+        st.markdown("**Disparity Statistics (pixels)**")
+        dd1, dd2, dd3 = st.columns(3)
+        dd1.metric("Disp Min", f"{result.disparity_min:.2f}")
+        dd2.metric("Disp Max", f"{result.disparity_max:.2f}")
+        dd3.metric("Disp Mean", f"{result.disparity_mean:.2f}")
+
+        st.markdown("**Geometry Matrices**")
+        st.markdown("**F (Fundamental Matrix)**")
+        st.code(np.array2string(result.fundamental_matrix, precision=6, suppress_small=False), language="text")
+        st.markdown("**E (Essential Matrix)**")
+        st.code(np.array2string(result.essential_matrix, precision=6, suppress_small=False), language="text")
+        st.markdown("**R (Rotation Matrix)**")
+        st.code(np.array2string(result.rotation_matrix, precision=6, suppress_small=False), language="text")
+        st.markdown("**t (Translation Vector)** — scaled by baseline" if result.use_metric_scaling else "**t (Translation Vector)** — unit (no scaling)")
+        st.code(np.array2string(result.translation_vector.reshape(-1, 1), precision=6, suppress_small=False), language="text")
+
+    # Sparse info
     if result.sparse_points.size > 0:
-        st.write(f"Sparse points: {len(result.sparse_points)}")
-    else:
-        st.write("No sparse points reconstructed.")
-    st.write("Dense point cloud has been exported as a PLY file and can be downloaded in the Downloads section.")
+        st.caption(f"Sparse triangulated points: {len(result.sparse_points)}")
+
+
+def _render_validation_warnings(result: PipelineResult) -> None:
+    """Show automatic warnings based on depth quality heuristics."""
+    raw_ratio = 100.0 * result.depth_raw_valid_count / max(1, result.depth_total_count)
+
+    if result.use_metric_scaling and result.depth_mean > 20.0:
+        st.warning(
+            f"⚠ Mean depth {result.depth_mean:.1f} m > 20 m — disparity may be too small or baseline incorrect."
+        )
+
+    if raw_ratio < 30.0:
+        st.warning("Low depth coverage. Improve scene texture or tune SGBM parameters.")
+
+    if result.disparity_valid_pct < 10.0:
+        st.warning("Very low disparity coverage. Scene may lack texture or numDisparities is too small.")
+
+    if result.depth_raw_valid_count > 0 and abs(result.depth_max - result.depth_min) < 1e-6:
+        st.warning("Depth min/max are identical — indicates a degenerate or near-constant depth estimate.")
 
 
 def _render_comparison_panel() -> None:
@@ -346,115 +476,100 @@ def _render_comparison_panel() -> None:
         st.info("Run the classical pipeline first to populate comparisons.")
         return
 
-    st.subheader("Uncalibrated vs Calibrated vs Deep Learning")
-    col1, col2, col3 = st.columns(3)
+    st.subheader("Uncalibrated Stereo vs Calibrated Stereo vs Deep Learning")
 
-    with col1:
-        st.caption("Uncalibrated")
-        st.image(result.disparity_unrectified, use_container_width=True, clamp=True)
-
-    with col2:
-        st.caption("Calibrated")
-        st.image(result.disparity_rectified, use_container_width=True, clamp=True)
-
-    with col3:
-        st.caption("Deep Learning")
-        left_image = st.session_state.get("stereo_left")
-        if left_image is None:
-            st.warning("Upload stereo images to run deep depth estimation.")
-        else:
-            sig = st.session_state.get("upload_signature")
-            should_recompute = (
-                st.session_state.get("dl_depth_vis") is None
-                or st.session_state.get("dl_depth_sig") != sig
-            )
-            if should_recompute:
-                with st.spinner("Running Depth Anything on left image..."):
-                    try:
-                        processor, model = _get_cached_depth_model()
-                        st.session_state["dl_depth_vis"] = predict_relative_depth(
-                            left_image,
-                            processor,
-                            model,
-                        )
-                        st.session_state["dl_depth_sig"] = sig
-                    except Exception as exc:
-                        st.session_state["dl_depth_vis"] = None
-                        st.error(f"Deep model inference failed: {exc}")
-
-            dl_depth = st.session_state.get("dl_depth_vis")
-            if dl_depth is not None:
-                st.image(dl_depth, use_container_width=True, clamp=True)
-                st.caption("Deep learning depth is relative and not metric.")
-
-    st.info("Rectification usually improves geometric consistency; learned refinement can further suppress local noise.")
-
-    st.subheader("Depth Values")
-    st.caption("Numerical depth summary for calibrated output.")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Raw Min", f"{result.depth_min:.3f}")
-    m2.metric("Raw Max", f"{result.depth_max:.3f}")
-    m3.metric("Raw Mean", f"{result.depth_mean:.3f}")
-
-    m4, m5, m6 = st.columns(3)
-    m4.metric("Clean Min", f"{result.depth_clean_min:.3f}")
-    m5.metric("Clean Max", f"{result.depth_clean_max:.3f}")
-    m6.metric("Clean Mean", f"{result.depth_clean_mean:.3f}")
-
-    p1, p2, p3 = st.columns(3)
-    p1.metric("P5", f"{result.depth_p5:.3f}")
-    p2.metric("P50 (Median)", f"{result.depth_p50:.3f}")
-    p3.metric("P95", f"{result.depth_p95:.3f}")
-
-    raw_ratio = 100.0 * result.depth_raw_valid_count / max(1, result.depth_total_count)
-    clean_ratio = 100.0 * result.depth_clean_valid_count / max(1, result.depth_total_count)
-    q1, q2, q3 = st.columns(3)
-    q1.metric("Raw Valid Pixels", f"{result.depth_raw_valid_count:,}")
-    q2.metric("Clean Valid Pixels", f"{result.depth_clean_valid_count:,}")
-    q3.metric("Coverage", f"raw {raw_ratio:.2f}% | clean {clean_ratio:.2f}%")
-
-    st.subheader("Depth Distribution Histogram")
-    hist_df = pd.DataFrame(
-        {
-            "depth": result.depth_hist_bin_centers,
-            "count": result.depth_hist_counts,
-        }
+    unrectified_disparity = getattr(
+        result,
+        "disparity_unrectified_raw",
+        result.disparity_map_raw,
     )
-    st.bar_chart(hist_df.set_index("depth"))
+    uncalibrated_depth = _depth_from_disparity(
+        unrectified_disparity,
+        result.focal_length_px,
+        result.baseline_meters,
+    )
+    calibrated_depth = _depth_from_disparity(
+        result.disparity_map_raw,
+        result.focal_length_px,
+        result.baseline_meters,
+    )
 
-    if result.depth_raw_valid_count == 0:
-        st.error("No positive finite depth pixels were found. Disparity is likely invalid for this pair.")
-    elif result.depth_clean_valid_count == 0:
-        st.warning(
-            "Clean depth contains no valid pixels after robust filtering. "
-            "This usually means the disparity/depth estimate is highly unstable."
+    calibrated_values = _sanitize_depth_values(calibrated_depth)
+    calibrated_mean = float(np.mean(calibrated_values)) if calibrated_values.size else None
+
+    left_image = st.session_state.get("stereo_left")
+    dl_depth_raw = None
+    if left_image is not None:
+        sig = st.session_state.get("upload_signature")
+        should_recompute = (
+            st.session_state.get("dl_depth_raw") is None
+            or st.session_state.get("dl_depth_sig") != sig
         )
-    elif abs(result.depth_max - result.depth_min) < 1e-6:
-        st.warning(
-            "Raw depth min/max are identical, which indicates a near-constant or degenerate depth estimate."
-        )
+        if should_recompute:
+            with st.spinner("Running Depth Anything on left image..."):
+                try:
+                    processor, model = _get_cached_depth_model()
+                    st.session_state["dl_depth_raw"] = predict_relative_depth_map(
+                        left_image,
+                        processor,
+                        model,
+                    )
+                    st.session_state["dl_depth_sig"] = sig
+                except Exception as exc:
+                    st.session_state["dl_depth_raw"] = None
+                    st.error(f"Deep model inference failed: {exc}")
 
-    if raw_ratio < 1.0:
-        st.warning(
-            "Very low valid depth coverage (<1%). Depth reliability is poor for this image pair."
-        )
+        dl_depth_raw = st.session_state.get("dl_depth_raw")
 
-    st.subheader("Failure Cases Panel")
-    f1, f2, f3 = st.columns(3)
-    with f1:
-        st.caption("Noisy Disparity (Unrectified)")
-        st.image(result.disparity_unrectified, use_container_width=True, clamp=True)
-    with f2:
-        st.caption("Raw Depth Before Filtering")
-        st.image(result.depth_raw_vis, use_container_width=True, clamp=True)
-    with f3:
-        st.caption("Failure Regions Mask")
-        st.image(result.depth_failure_mask, use_container_width=True, clamp=True)
+    dl_depth_metric = None
+    if dl_depth_raw is not None:
+        dl_values = _sanitize_depth_values(dl_depth_raw, clip_max=None)
+        dl_mean = float(np.mean(dl_values)) if dl_values.size else None
+        if calibrated_mean is not None and dl_mean is not None and dl_mean > 0:
+            scale = calibrated_mean / dl_mean
+            dl_depth_metric = np.asarray(dl_depth_raw, dtype=np.float32) * scale
 
-    st.write(
-        "Stereo fails in low-texture regions because local windows lack unique intensity patterns. "
-        "Repetitive patterns create ambiguous correspondences that can pass local matching checks, "
-        "leading to noisy disparity and invalid depth estimates."
+    def _render_depth_card(
+        column,
+        title: str,
+        depth_values: np.ndarray,
+        image: np.ndarray | None,
+        note: str | None = None,
+    ) -> None:
+        with column:
+            st.markdown(f"**{title}**")
+            if image is not None:
+                st.image(image, use_container_width=True)
+            else:
+                st.warning("Depth data unavailable.")
+
+            min_val, mean_val, max_val = _depth_summary(depth_values)
+            st.metric("Min Depth", _format_depth_metric(min_val))
+            st.metric("Mean Depth", _format_depth_metric(mean_val))
+            st.metric("Max Depth", _format_depth_metric(max_val))
+
+            if note:
+                st.caption(note)
+
+    col1, col2, col3 = st.columns(3)
+    _render_depth_card(
+        col1,
+        "Uncalibrated Stereo",
+        uncalibrated_depth,
+        _depth_to_colormap(uncalibrated_depth),
+    )
+    _render_depth_card(
+        col2,
+        "Calibrated Stereo",
+        calibrated_depth,
+        _depth_to_colormap(calibrated_depth),
+    )
+    _render_depth_card(
+        col3,
+        "Deep Learning (Estimated)",
+        dl_depth_metric if dl_depth_metric is not None else np.array([], dtype=np.float32),
+        _depth_to_colormap(dl_depth_metric) if dl_depth_metric is not None else None,
+        note="Depth values are scaled estimates based on stereo calibration and may not be perfectly accurate.",
     )
 
 
@@ -474,6 +589,12 @@ def _render_download_panel() -> None:
             label="Download Depth Map (PNG)",
             data=_png_bytes(result.depth_clean_vis),
             file_name="depth_clean.png",
+            mime="image/png",
+        )
+        st.download_button(
+            label="Download Depth Colormap (PNG)",
+            data=_png_bytes(result.depth_colored),
+            file_name="depth_colormap.png",
             mime="image/png",
         )
         st.download_button(
@@ -502,6 +623,49 @@ def _render_download_panel() -> None:
             mime="application/octet-stream",
         )
 
+    # --- Save / Load Calibration Settings ---
+    st.subheader("Calibration Settings (.npz)")
+    st.caption("Saves baseline, camera matrix, and metric toggle for reuse across sessions.")
+
+    save_col, load_col = st.columns(2)
+    with save_col:
+        baseline_val = st.session_state.get("baseline", 0.10)
+        metric_val = st.session_state.get("use_metric_scaling", True)
+        cam = CAMERA_MATRIX
+        if calib_result is not None:
+            cam = calib_result.camera_matrix
+        buf = io.BytesIO()
+        np.savez(buf, baseline_meters=np.array([baseline_val]), camera_matrix=cam, use_metric_scaling=np.array([metric_val]))
+        buf.seek(0)
+        st.download_button(
+            label="Save Calibration Settings (.npz)",
+            data=buf.getvalue(),
+            file_name="calibration_settings.npz",
+            mime="application/octet-stream",
+        )
+
+    with load_col:
+        uploaded_settings = st.file_uploader("Load Calibration Settings (.npz)", type=["npz"], key="settings_upload")
+        if uploaded_settings is not None:
+            try:
+                data = np.load(io.BytesIO(uploaded_settings.getvalue()), allow_pickle=False)
+                if "baseline_meters" in data:
+                    st.session_state["baseline"] = float(data["baseline_meters"].item())
+                if "use_metric_scaling" in data:
+                    st.session_state["use_metric_scaling"] = bool(data["use_metric_scaling"].item())
+                if "camera_matrix" in data:
+                    loaded_cam = data["camera_matrix"]
+                    if loaded_cam.shape == (3, 3):
+                        st.session_state["calibration_result"] = CalibrationResult(
+                            camera_matrix=loaded_cam,
+                            distortion=np.zeros(5),
+                            reprojection_error=0.0,
+                            valid_images=0,
+                        )
+                st.success(f"Settings loaded — baseline={st.session_state['baseline']:.2f}m, metric={'ON' if st.session_state['use_metric_scaling'] else 'OFF'}")
+            except Exception as exc:
+                st.error(f"Failed to load settings: {exc}")
+
 
 def _init_state() -> None:
     defaults = {
@@ -511,8 +675,10 @@ def _init_state() -> None:
         "calibration_result": None,
         "pipeline_result": None,
         "upload_signature": None,
-        "dl_depth_vis": None,
+        "dl_depth_raw": None,
         "dl_depth_sig": None,
+        "baseline": 0.10,
+        "use_metric_scaling": True,
     }
     for key, value in defaults.items():
         if key not in st.session_state:

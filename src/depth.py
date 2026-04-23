@@ -30,21 +30,25 @@ def compute_disparity(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
     gray1 = img1 if img1.ndim == 2 else cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
     gray2 = img2 if img2.ndim == 2 else cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
+    block_size = 5
     stereo = cv2.StereoSGBM_create(
         minDisparity=0,
-        numDisparities=16 * 10,
-        blockSize=7,
-        P1=8 * 3 * 7**2,
-        P2=32 * 3 * 7**2,
+        numDisparities=256,  # 16 * 16, divisible by 16; catches close objects
+        blockSize=block_size,
+        P1=8 * 3 * block_size ** 2,
+        P2=32 * 3 * block_size ** 2,
         disp12MaxDiff=1,
-        uniquenessRatio=15,
-        speckleWindowSize=150,
+        uniquenessRatio=8,
+        speckleWindowSize=50,
         speckleRange=2,
         preFilterCap=63,
+        mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
     )
 
     # StereoSGBM returns disparity in 16x fixed-point; divide by 16 for pixel units.
     raw = stereo.compute(gray1, gray2).astype(np.float32) / 16.0
+    # Median removes salt-and-pepper noise; bilateral smooths while preserving depth edges.
     raw = cv2.medianBlur(raw, 5)
+    raw = cv2.bilateralFilter(raw, 9, 75, 75)
     disp_norm = cv2.normalize(raw, None, 0, 255, cv2.NORM_MINMAX)
     return raw, disp_norm.astype(np.uint8)
