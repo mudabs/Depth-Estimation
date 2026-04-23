@@ -647,8 +647,8 @@ def _render_comparison_panel() -> None:
             st.metric("Median Depth", _format_depth_metric(median_val))
             st.metric("Max Depth", _format_depth_metric(max_val))
 
-            if note:
-                st.caption(note)
+            # Always show the note area, even if empty
+            st.caption(note if note is not None else "")
 
     col1, col2, col3, col4, col5 = st.columns(5)
 
