@@ -390,8 +390,9 @@ def _render_classical_pipeline_panel() -> None:
     else:
         st.warning(f"Pixel ({int(px_x)}, {int(px_y)}) → No valid depth (invalid/occluded)")
 
+
     # --- 3D Visualization ---
-    st.subheader("3D Visualization")
+    st.subheader("3D Visualization: Calibrated Stereo Point Cloud")
     if go is None:
         st.warning("Plotly is not installed. Install it with: pip install plotly")
     elif result.preview_points_xyz.size == 0:
@@ -399,11 +400,12 @@ def _render_classical_pipeline_panel() -> None:
     else:
         max_n = int(len(result.preview_points_xyz))
         n_show = st.slider(
-            "Preview points",
+            "Preview points (classical)",
             min_value=1000 if max_n >= 1000 else 100,
             max_value=max_n,
             value=min(5000, max_n),
             step=500 if max_n >= 5000 else 100,
+            key="classical_pc_slider",
         )
 
         pts = result.preview_points_xyz[:n_show]
@@ -430,9 +432,70 @@ def _render_classical_pipeline_panel() -> None:
                 "zaxis_title": f"Z ({unit})",
                 "aspectmode": "data",
             },
-            title="Point Cloud Preview",
+            title="Point Cloud Preview (Classical)",
         )
         st.plotly_chart(fig, use_container_width=True)
+
+    # --- DL (CREStereo) Point Cloud Visualization ---
+    st.subheader("3D Visualization: DL Stereo Point Cloud (CREStereo)")
+    stereo_dl_disp_raw = st.session_state.get("stereo_dl_disp_raw")
+    left_image = st.session_state.get("stereo_left")
+    if go is not None and stereo_dl_disp_raw is not None and left_image is not None:
+        # Reproject using the same Q matrix as classical (approximate)
+        # Use the same calibration as the classical pipeline
+        try:
+            from src.visualization import filter_pointcloud
+            from src.visualization import plot_dense_pointcloud
+            # Use classical Q matrix for reproject (approximate)
+            # Use classical camera matrix and baseline
+            focal_length_px = result.focal_length_px
+            baseline_m = result.baseline_meters
+            h, w = stereo_dl_disp_raw.shape
+            # Build Q matrix (same as in classical pipeline)
+            Q = np.array([
+                [1, 0, 0, -w / 2],
+                [0, 1, 0, -h / 2],
+                [0, 0, 0, focal_length_px],
+                [0, 0, 1 / baseline_m, 0],
+            ], dtype=np.float32)
+            points_3d_dl = cv2.reprojectImageTo3D(stereo_dl_disp_raw, Q)
+            z = points_3d_dl[:, :, 2]
+            mask = np.isfinite(z) & (z > 0.0) & (z < 10.0)
+            pts_dl = points_3d_dl[mask]
+            cols_dl = left_image[mask][:, ::-1]  # BGR to RGB
+            max_dl = min(12000, len(pts_dl))
+            if max_dl > 0:
+                idx = np.random.choice(len(pts_dl), size=max_dl, replace=False)
+                pts_dl = pts_dl[idx]
+                cols_dl = cols_dl[idx]
+                colors_dl = [f"rgb({int(r)},{int(g)},{int(b)})" for r, g, b in cols_dl]
+                fig_dl = go.Figure(
+                    data=[
+                        go.Scatter3d(
+                            x=pts_dl[:, 0],
+                            y=pts_dl[:, 1],
+                            z=pts_dl[:, 2],
+                            mode="markers",
+                            marker={"size": 2, "color": colors_dl, "opacity": 0.8},
+                        )
+                    ]
+                )
+                fig_dl.update_layout(
+                    height=600,
+                    margin={"l": 0, "r": 0, "b": 0, "t": 30},
+                    scene={
+                        "xaxis_title": f"X ({unit})",
+                        "yaxis_title": f"Y ({unit})",
+                        "zaxis_title": f"Z ({unit})",
+                        "aspectmode": "data",
+                    },
+                    title="Point Cloud Preview (CREStereo DL)",
+                )
+                st.plotly_chart(fig_dl, use_container_width=True)
+            else:
+                st.warning("No valid DL 3D points available for preview.")
+        except Exception as exc:
+            st.warning(f"DL point cloud visualization failed: {exc}")
 
     # --- Debug Panel ---
     with st.expander("Debug Panel", expanded=False):
