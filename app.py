@@ -87,18 +87,18 @@ def _png_bytes(image: np.ndarray) -> bytes:
     return encoded.tobytes()
 
 
-def _sanitize_depth_values(depth: np.ndarray, clip_max: float = 10.0) -> np.ndarray:
-    """Return finite positive depth samples clipped to a display range."""
+def _depth_values(depth: np.ndarray, *, max_depth: float | None = 10.0) -> np.ndarray:
+    """Return finite positive depth samples with optional upper-bound clipping."""
     values = np.asarray(depth, dtype=np.float32).ravel()
     values = values[np.isfinite(values)]
     values = values[values > 0]
-    if clip_max is not None:
-        values = np.clip(values, 0.0, clip_max)
+    if max_depth is not None:
+        values = np.clip(values, 0.0, float(max_depth))
     return values
 
 
-def _depth_summary(depth: np.ndarray, clip_max: float = 10.0) -> tuple[float | None, float | None, float | None]:
-    values = _sanitize_depth_values(depth, clip_max=clip_max)
+def _depth_summary(depth: np.ndarray) -> tuple[float | None, float | None, float | None]:
+    values = _depth_values(depth)
     if values.size == 0:
         return None, None, None
     return float(values.min()), float(values.mean()), float(values.max())
@@ -114,11 +114,12 @@ def _depth_from_disparity(disparity: np.ndarray, focal_length_px: float, baselin
     return depth
 
 
-def _depth_to_colormap(depth: np.ndarray, clip_max: float = 10.0) -> np.ndarray:
+def _depth_to_colormap(depth: np.ndarray, max_depth: float = 10.0) -> np.ndarray:
     """Render depth values with a simple inferno colormap."""
     depth_vis = np.asarray(depth, dtype=np.float32)
     depth_vis = np.where(np.isfinite(depth_vis) & (depth_vis > 0), depth_vis, 0.0)
-    depth_vis = np.clip(depth_vis, 0.0, clip_max)
+    if max_depth is not None:
+        depth_vis = np.clip(depth_vis, 0.0, float(max_depth))
     if np.any(depth_vis > 0):
         norm = cv2.normalize(depth_vis, None, 0, 255, cv2.NORM_MINMAX)
     else:
@@ -318,17 +319,9 @@ def _render_classical_pipeline_panel() -> None:
         return
 
     unit = "m" if result.use_metric_scaling else "(relative)"
-    st.info(
-        f"Depth summaries below are shown in meters using baseline = {result.baseline_meters:.2f} meters. "
-        f"Metric scaling inside the pipeline: {'ON' if result.use_metric_scaling else 'OFF'}."
-    )
 
     # --- Validation Warnings ---
     _render_validation_warnings(result)
-
-    # --- Auto-tune Suggestion ---
-    if result.auto_tune_suggestion:
-        st.info(f"🔧 {result.auto_tune_suggestion}")
 
     st.subheader("Feature Matching")
     st.image(_bgr_to_rgb(result.match_visualization), caption="ORB inlier matches", use_container_width=True)
@@ -348,7 +341,7 @@ def _render_classical_pipeline_panel() -> None:
     # --- Depth Visualization ---
     st.subheader("Depth Map")
     calibrated_depth = _depth_from_disparity(result.disparity_map_raw, result.focal_length_px, result.baseline_meters)
-    st.image(_depth_to_colormap(calibrated_depth), caption="Calibrated stereo depth clipped to 0-10 m", use_container_width=True)
+    st.image(_depth_to_colormap(calibrated_depth), caption="Calibrated stereo depth", use_container_width=True)
     calib_min, calib_mean, calib_max = _depth_summary(calibrated_depth)
     depth_cols = st.columns(3)
     depth_cols[0].metric("Min Depth", _format_depth_metric(calib_min))
@@ -468,6 +461,17 @@ def _render_validation_warnings(result: PipelineResult) -> None:
         st.warning("Depth min/max are identical — indicates a degenerate or near-constant depth estimate.")
 
 
+def _render_validation_warnings(result: PipelineResult) -> None:
+    """Show a minimal set of depth quality warnings."""
+    if result.use_metric_scaling and result.depth_mean > 20.0:
+        st.warning(
+            f"Mean depth {result.depth_mean:.1f} m > 20 m; disparity may be too small or baseline incorrect."
+        )
+
+    if result.depth_raw_valid_count > 0 and abs(result.depth_max - result.depth_min) < 1e-6:
+        st.warning("Depth min/max are identical, which suggests a degenerate or near-constant depth estimate.")
+
+
 def _render_comparison_panel() -> None:
     st.header("Comparison")
 
@@ -476,7 +480,7 @@ def _render_comparison_panel() -> None:
         st.info("Run the classical pipeline first to populate comparisons.")
         return
 
-    st.subheader("Uncalibrated Stereo vs Calibrated Stereo vs Deep Learning")
+    st.subheader("Depth Comparison")
 
     unrectified_disparity = getattr(
         result,
@@ -494,7 +498,7 @@ def _render_comparison_panel() -> None:
         result.baseline_meters,
     )
 
-    calibrated_values = _sanitize_depth_values(calibrated_depth)
+    calibrated_values = _depth_values(calibrated_depth, max_depth=None)
     calibrated_mean = float(np.mean(calibrated_values)) if calibrated_values.size else None
 
     left_image = st.session_state.get("stereo_left")
@@ -523,7 +527,7 @@ def _render_comparison_panel() -> None:
 
     dl_depth_metric = None
     if dl_depth_raw is not None:
-        dl_values = _sanitize_depth_values(dl_depth_raw, clip_max=None)
+        dl_values = _depth_values(dl_depth_raw, max_depth=None)
         dl_mean = float(np.mean(dl_values)) if dl_values.size else None
         if calibrated_mean is not None and dl_mean is not None and dl_mean > 0:
             scale = calibrated_mean / dl_mean
@@ -537,7 +541,7 @@ def _render_comparison_panel() -> None:
         note: str | None = None,
     ) -> None:
         with column:
-            st.markdown(f"**{title}**")
+            st.markdown(f"#### {title}")
             if image is not None:
                 st.image(image, use_container_width=True)
             else:

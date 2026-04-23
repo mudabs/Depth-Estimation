@@ -167,8 +167,8 @@ def main() -> None:
         return
     print(f"Saved failure example (raw depth) to: {raw_depth_failure_path}")
 
-    # Optional helper image: highlights where depth is invalid or extreme.
-    invalid_regions = (depth_map <= 0) | (depth_map > 100) | (~np.isfinite(depth_map))
+    # Optional helper image: highlights where depth is invalid.
+    invalid_regions = (depth_map <= 0) | (~np.isfinite(depth_map))
     invalid_vis = np.zeros(depth_map.shape, dtype=np.uint8)
     invalid_vis[invalid_regions] = 255
     invalid_depth_regions_path = failure_dir / "depth_failure_regions.png"
@@ -182,7 +182,7 @@ def main() -> None:
             rect1,
             pointcloud_output_path,
             z_min=0.0,
-            z_max=100.0,
+            z_max=None,
         )
     except Exception as exc:
         print(f"Failed to export point cloud: {exc}")
@@ -257,11 +257,11 @@ def main() -> None:
     depth_clean[~valid_mask_clean] = 0
     depth_clean_vis = np.zeros(depth_map.shape, dtype=np.uint8)
 
-    # Clip extreme values using the 95th percentile of valid pixels.
+    # Keep only the lower 95% of valid pixels for the clean preview.
     valid_pixels = depth_clean[valid_mask_clean]
     if valid_pixels.size > 0:
         p95 = float(np.percentile(valid_pixels, 95))
-        depth_clean = np.clip(depth_clean, 0, p95)
+        depth_clean = np.where(depth_clean < p95, depth_clean, 0)
         depth_clean_vis = cv2.normalize(depth_clean, None, 0, 255, cv2.NORM_MINMAX)
         depth_clean_vis = depth_clean_vis.astype(np.uint8)
         depth_clean_path = depth_output_dir / "depth_clean.png"

@@ -6,8 +6,8 @@ import cv2
 import numpy as np
 
 
-def compute_disparity(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
-    """Compute a dense disparity map from a stereo image pair.
+def compute_sgbm(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a dense disparity map with OpenCV SGBM.
 
     Args:
         img1: Left stereo image in BGR or grayscale format.
@@ -52,3 +52,38 @@ def compute_disparity(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
     raw = cv2.bilateralFilter(raw, 9, 75, 75)
     disp_norm = cv2.normalize(raw, None, 0, 255, cv2.NORM_MINMAX)
     return raw, disp_norm.astype(np.uint8)
+
+
+def compute_unimatch(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Placeholder for a future UniMatch stereo backend."""
+    raise NotImplementedError("UniMatch disparity is not implemented yet.")
+
+
+def compute_disparity(
+    method: str | np.ndarray = "sgbm",
+    left: np.ndarray | None = None,
+    right: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Dispatch to the requested disparity backend.
+
+    The function keeps backward compatibility with the historical
+    compute_disparity(left, right) call shape while also supporting the
+    explicit compute_disparity("sgbm", left, right) form.
+    """
+    if isinstance(method, np.ndarray):
+        left_image = method
+        right_image = left
+        method_name = "sgbm"
+    else:
+        left_image = left
+        right_image = right
+        method_name = str(method).lower()
+
+    if left_image is None or right_image is None:
+        raise ValueError("Both stereo images must be provided.")
+
+    if method_name == "sgbm":
+        return compute_sgbm(left_image, right_image)
+    if method_name == "unimatch":
+        return compute_unimatch(left_image, right_image)
+    raise ValueError(f"Unsupported disparity method: {method_name}")

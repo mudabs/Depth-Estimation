@@ -44,7 +44,7 @@ def export_colored_pointcloud_from_depth(
     rectified_left_bgr: np.ndarray,
     output_path: Path,
     z_min: float = 0.0,
-    z_max: float = 100.0,
+    z_max: float | None = None,
 ) -> int:
     """Export a filtered colored point cloud from dense reprojected points.
 
@@ -53,7 +53,7 @@ def export_colored_pointcloud_from_depth(
         rectified_left_bgr: Rectified left image of shape (H, W, 3) in BGR.
         output_path: Output path for .ply file.
         z_min: Minimum valid depth (exclusive).
-        z_max: Maximum valid depth (inclusive).
+        z_max: Maximum valid depth (inclusive), or None to disable the upper bound.
 
     Returns:
         Number of vertices written to the PLY file.
@@ -69,7 +69,9 @@ def export_colored_pointcloud_from_depth(
         raise ValueError("3D points and color image must have the same height and width.")
 
     z = points_3d_dense[:, :, 2]
-    valid = np.isfinite(z) & (z > z_min) & (z <= z_max)
+    valid = np.isfinite(z) & (z > z_min)
+    if z_max is not None:
+        valid &= z <= z_max
 
     points = points_3d_dense[valid]
     colors_bgr = rectified_left_bgr[valid]
