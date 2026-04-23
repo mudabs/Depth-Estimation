@@ -84,3 +84,37 @@ def export_colored_pointcloud_from_depth(
     points_rgb = np.hstack([points.astype(np.float64), colors_rgb.astype(np.float64)])
     _write_ascii_ply(points_rgb, output_path)
     return points_rgb.shape[0]
+
+
+# --- New: Downsample and Clean Dense Point Cloud ---
+def clean_and_downsample_pointcloud(points_3d: np.ndarray, colors: np.ndarray = None, z_min: float = 0.0, z_max: float = None, sample: int = 1):
+    """
+    Filter and downsample a dense point cloud for visualization or export.
+
+    Args:
+        points_3d: (H, W, 3) or (N, 3) array.
+        colors: (H, W, 3) or (N, 3) array or None.
+        z_min: Minimum Z value to keep (exclusive).
+        z_max: Maximum Z value to keep (inclusive).
+        sample: Subsample factor (e.g., 10 = keep every 10th point).
+
+    Returns:
+        (points, colors) tuple, both (M, 3) arrays.
+    """
+    pts = points_3d.reshape(-1, 3)
+    if colors is not None:
+        cols = colors.reshape(-1, 3)
+    else:
+        cols = None
+    mask = np.isfinite(pts[:, 2]) & (pts[:, 2] > z_min)
+    if z_max is not None:
+        mask &= pts[:, 2] <= z_max
+    pts = pts[mask]
+    if cols is not None:
+        cols = cols[mask]
+    if sample > 1:
+        idx = np.arange(0, len(pts), sample)
+        pts = pts[idx]
+        if cols is not None:
+            cols = cols[idx]
+    return pts, cols

@@ -98,3 +98,93 @@ def plot_3d_points(points_3d: np.ndarray) -> None:
     ax.set_title("Reconstructed 3D Points")
     plt.tight_layout()
     _show_or_close()
+
+
+# --- New: DL Dense Point Cloud Visualization ---
+def plot_dense_pointcloud(points_3d: np.ndarray, colors: np.ndarray = None, sample: int = 1, z_min: float = 0.0, z_max: float = None, title: str = "Dense 3D Point Cloud") -> None:
+    """
+    Visualize a dense 3D point cloud with optional color and outlier filtering.
+
+    Args:
+        points_3d: (H, W, 3) or (N, 3) array of 3D points.
+        colors: (H, W, 3) or (N, 3) array of uint8 RGB colors, or None.
+        sample: Subsample factor for visualization (e.g., 10 = show every 10th point).
+        z_min: Minimum Z value to keep (exclusive).
+        z_max: Maximum Z value to keep (inclusive).
+        title: Plot title.
+    """
+    pts = points_3d.reshape(-1, 3)
+    if colors is not None:
+        cols = colors.reshape(-1, 3)
+    else:
+        cols = None
+    mask = np.isfinite(pts[:, 2]) & (pts[:, 2] > z_min)
+    if z_max is not None:
+        mask &= pts[:, 2] <= z_max
+    pts = pts[mask]
+    if cols is not None:
+        cols = cols[mask]
+    if sample > 1:
+        idx = np.arange(0, len(pts), sample)
+        pts = pts[idx]
+        if cols is not None:
+            cols = cols[idx]
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    if cols is not None:
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=cols / 255.0, s=1)
+    else:
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=1)
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title(title)
+    plt.tight_layout()
+    _show_or_close()
+
+
+# --- New: Clean Disparity Visualization ---
+def clean_disparity_vis(disp: np.ndarray, invalid_val: float = 0.0, cmap: str = "plasma") -> np.ndarray:
+    """
+    Create a clean visualization for a disparity map, masking invalid values and applying a colormap.
+
+    Args:
+        disp: Disparity map (float32 or uint8).
+        invalid_val: Value to treat as invalid (e.g., 0 or <0).
+        cmap: Matplotlib colormap name.
+
+    Returns:
+        RGB uint8 image for display.
+    """
+    disp_vis = disp.copy()
+    mask = (disp_vis <= invalid_val) | ~np.isfinite(disp_vis)
+    disp_vis[mask] = np.nan
+    vmin = np.nanmin(disp_vis)
+    vmax = np.nanmax(disp_vis)
+    norm_disp = (disp_vis - vmin) / (vmax - vmin + 1e-6)
+    norm_disp[mask] = np.nan
+    cm = plt.get_cmap(cmap)
+    colored = cm(norm_disp)
+    colored[..., 3][mask] = 0  # Set alpha to 0 for invalid
+    rgb = (colored[..., :3] * 255).astype(np.uint8)
+    return rgb
+
+
+# --- New: Clean Point Cloud Utility ---
+def filter_pointcloud(points_3d: np.ndarray, z_min: float = 0.0, z_max: float = None) -> np.ndarray:
+    """
+    Remove outliers from a 3D point cloud based on Z range and finite values.
+
+    Args:
+        points_3d: (N, 3) or (H, W, 3) array.
+        z_min: Minimum Z value to keep (exclusive).
+        z_max: Maximum Z value to keep (inclusive).
+
+    Returns:
+        Filtered (M, 3) array.
+    """
+    pts = points_3d.reshape(-1, 3)
+    mask = np.isfinite(pts[:, 2]) & (pts[:, 2] > z_min)
+    if z_max is not None:
+        mask &= pts[:, 2] <= z_max
+    return pts[mask]
