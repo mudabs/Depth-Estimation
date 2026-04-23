@@ -736,9 +736,9 @@ def _init_state() -> None:
         "upload_signature": None,
         "dl_depth_raw": None,
         "dl_depth_sig": None,
-        "unimatch_disp_raw": None,
-        "unimatch_sig": None,
-        "unimatch_status": None,
+        "stereo_dl_disp_raw": None,
+        "stereo_dl_sig": None,
+        "stereo_dl_status": None,
         "baseline": 0.10,
         "use_metric_scaling": True,
     }
