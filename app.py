@@ -408,8 +408,42 @@ def _render_classical_pipeline_panel() -> None:
             key="classical_pc_slider",
         )
 
+
         pts = result.preview_points_xyz[:n_show]
         cols = result.preview_points_rgb[:n_show]
+
+        # --- Depth filtering ---
+        z = pts[:, 2]
+        depth_mask = (
+            np.isfinite(z) &
+            (z > 0.1) &
+            (z < 1.5)
+        )
+
+        pts = pts[depth_mask]
+        cols = cols[depth_mask]
+
+        # --- Density filtering ---
+        from sklearn.neighbors import NearestNeighbors
+
+        nbrs = NearestNeighbors(n_neighbors=10).fit(pts)
+        distances, _ = nbrs.kneighbors(pts)
+        mean_dist = distances.mean(axis=1)
+
+        density_mask = mean_dist < np.percentile(mean_dist, 90)
+
+        pts = pts[density_mask]
+        cols = cols[density_mask]
+
+        # --- Downsample ---
+        if len(pts) > 50000:
+            idx = np.random.choice(len(pts), 50000, replace=False)
+            pts = pts[idx]
+            cols = cols[idx]
+
+        # --- Normalize colors ---
+        if cols.max() > 1:
+            cols = cols / 255.0 * 255.0     
         colors = [f"rgb({int(r)},{int(g)},{int(b)})" for r, g, b in cols]
 
         fig = go.Figure(
