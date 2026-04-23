@@ -101,16 +101,21 @@ def _depth_summary(depth: np.ndarray) -> tuple[float | None, float | None, float
     values = _depth_values(depth, max_depth=None)
     if values.size == 0:
         return None, None, None
+    cutoff = float(np.percentile(values, 99))
+    filtered = values[values < cutoff]
+    if filtered.size > 0:
+        values = filtered
     return float(values.min()), float(values.mean()), float(values.max())
 
 
 def _depth_from_disparity(disparity: np.ndarray, focal_length_px: float, baseline_meters: float) -> np.ndarray:
     """Convert disparity values to approximate metric depth."""
     disp = np.asarray(disparity, dtype=np.float32)
-    depth = np.zeros_like(disp, dtype=np.float32)
-    valid = np.isfinite(disp) & (disp > 0)
-    if np.any(valid):
-        depth[valid] = (float(focal_length_px) * float(baseline_meters)) / disp[valid]
+    disparity_safe = disp.copy()
+    disparity_safe[~np.isfinite(disparity_safe)] = np.nan
+    disparity_safe[disparity_safe <= 1.0] = np.nan
+    depth = (float(focal_length_px) * float(baseline_meters)) / disparity_safe
+    depth[~np.isfinite(depth)] = np.nan
     return depth
 
 

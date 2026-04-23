@@ -187,8 +187,8 @@ def run_classical_pipeline(
     _raw_unrect, disparity_unrect = compute_disparity(left_image, right_image)
     raw_disparity, disparity_rect = compute_disparity(rect_left, rect_right)
 
-    # Disparity: mask invalid pixels (≤0) before using for depth
-    invalid_disp_mask = raw_disparity <= 0
+    # Disparity: mask invalid pixels and very small disparities before using for depth.
+    invalid_disp_mask = raw_disparity <= 1.0
     disp_positive = raw_disparity[~invalid_disp_mask]
     if disp_positive.size > 0:
         disparity_min = float(np.min(disp_positive))
@@ -207,16 +207,16 @@ def run_classical_pipeline(
     points_3d_dense = cv2.reprojectImageTo3D(raw_disparity, Q)
     depth_map = points_3d_dense[:, :, 2].astype(np.float32)
 
-    # Stabilize: zero out invalid-disparity regions, non-finite values, then clamp + smooth
-    depth_map[invalid_disp_mask] = 0.0
-    depth_map[~np.isfinite(depth_map)] = 0.0
-    depth_map = np.clip(depth_map, 0.0, 10.0)  # assume indoor scene ≤ 10 m
+    # Stabilize: invalidate tiny disparities, then clean non-finite values.
+    depth_map[invalid_disp_mask] = np.nan
+    depth_map[~np.isfinite(depth_map)] = np.nan
     depth_map = cv2.medianBlur(depth_map, 5)
 
     # Raw depth visualization (grayscale normalize)
-    depth_raw_vis = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    depth_raw_vis = np.nan_to_num(depth_map.copy(), nan=0.0, posinf=0.0, neginf=0.0)
+    depth_raw_vis = cv2.normalize(depth_raw_vis, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    valid_depth_mask = depth_map > 0
+    valid_depth_mask = np.isfinite(depth_map) & (depth_map > 0)
     valid_depth_values = depth_map[valid_depth_mask]
 
     # Robust cleaned depth: filter outer 1% of positive depth values
@@ -253,14 +253,23 @@ def run_classical_pipeline(
         depth_hist_counts = np.zeros(20, dtype=np.int64)
         depth_hist_bin_centers = np.linspace(0, 1, 20, dtype=np.float32)
     else:
-        depth_min = float(np.min(valid_depth))
-        depth_max = float(np.max(valid_depth))
-        depth_mean = float(np.mean(valid_depth))
-        depth_median = float(np.median(valid_depth))
-        depth_p5 = float(np.percentile(valid_depth, 5))
-        depth_p50 = float(np.percentile(valid_depth, 50))
-        depth_p95 = float(np.percentile(valid_depth, 95))
-        depth_hist_counts, bin_edges = np.histogram(valid_depth, bins=20)
+        depth_stats = valid_depth[np.isfinite(valid_depth) & (valid_depth > 0)]
+        if depth_stats.size > 0:
+            stats_cutoff = float(np.percentile(depth_stats, 99))
+            filtered_stats = depth_stats[depth_stats < stats_cutoff]
+            if filtered_stats.size > 0:
+                depth_stats = filtered_stats
+        else:
+            depth_stats = valid_depth
+
+        depth_min = float(np.min(depth_stats))
+        depth_max = float(np.max(depth_stats))
+        depth_mean = float(np.mean(depth_stats))
+        depth_median = float(np.median(depth_stats))
+        depth_p5 = float(np.percentile(depth_stats, 5))
+        depth_p50 = float(np.percentile(depth_stats, 50))
+        depth_p95 = float(np.percentile(depth_stats, 95))
+        depth_hist_counts, bin_edges = np.histogram(depth_stats, bins=20)
         depth_hist_bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
     clean_values = depth_clean[clean_mask]
