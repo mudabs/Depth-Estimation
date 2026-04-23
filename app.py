@@ -10,6 +10,7 @@ from typing import Iterable
 import cv2
 import numpy as np
 import streamlit as st
+import torch
 try:
     import plotly.graph_objects as go
 except Exception:
@@ -20,6 +21,7 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from src.calibration import calibrate_camera, find_checkerboard_corners
 from src.config import CALIB_PATTERN_SIZE, CAMERA_MATRIX, OUTPUT_PATH
+from src.crestereo_depth import compute_stereo_dl_disparity, load_stereo_dl_model
 from src.deep_depth import load_depth_model, predict_relative_depth_map
 from src.web_pipeline import CalibrationResult, PipelineResult, create_side_by_side, run_classical_pipeline
 
@@ -138,6 +140,12 @@ def _get_cached_depth_model():
     return load_depth_model()
 
 
+@st.cache_resource(show_spinner=False)
+def get_stereo_dl_model():
+    """Load the stereo DL model once per Streamlit process."""
+    return load_stereo_dl_model()
+
+
 def _render_upload_panel() -> None:
     st.header("Upload Data")
 
@@ -163,6 +171,9 @@ def _render_upload_panel() -> None:
         st.session_state.pop("calibration_result", None)
         st.session_state.pop("dl_depth_raw", None)
         st.session_state.pop("dl_depth_sig", None)
+        st.session_state.pop("stereo_dl_disp_raw", None)
+        st.session_state.pop("stereo_dl_sig", None)
+        st.session_state.pop("stereo_dl_status", None)
 
     if len(stereo_files or []) != 2:
         st.warning("Exactly 2 stereo images are required.")
@@ -503,6 +514,7 @@ def _render_comparison_panel() -> None:
     calibrated_mean = float(np.mean(calibrated_values)) if calibrated_values.size else None
 
     left_image = st.session_state.get("stereo_left")
+    right_image = st.session_state.get("stereo_right")
     dl_depth_raw = None
     if left_image is not None:
         sig = st.session_state.get("upload_signature")
@@ -534,6 +546,43 @@ def _render_comparison_panel() -> None:
             scale = calibrated_mean / dl_mean
             dl_depth_metric = np.asarray(dl_depth_raw, dtype=np.float32) * scale
 
+    unimatch_depth = None
+    unimatch_note = "Stereo DL uses learned matching and may improve results in low-texture regions."
+    if left_image is not None and right_image is not None:
+        stereo_dl_sig = st.session_state.get("upload_signature")
+        should_recompute_stereo_dl = (
+            st.session_state.get("stereo_dl_status") != "unavailable"
+            and (
+                st.session_state.get("stereo_dl_disp_raw") is None
+                or st.session_state.get("stereo_dl_sig") != stereo_dl_sig
+            )
+        )
+        if should_recompute_stereo_dl:
+            try:
+                with st.spinner("Running Stereo DL on stereo pair..."):
+                    model = get_stereo_dl_model()
+                    st.session_state["stereo_dl_disp_raw"] = compute_stereo_dl_disparity(
+                        left_image,
+                        right_image,
+                        model,
+                    )
+                    st.session_state["stereo_dl_sig"] = stereo_dl_sig
+                    st.session_state["stereo_dl_status"] = "available"
+            except Exception as exc:
+                st.session_state["stereo_dl_disp_raw"] = None
+                st.session_state["stereo_dl_sig"] = stereo_dl_sig
+                st.session_state["stereo_dl_status"] = "unavailable"
+                st.warning("Stereo DL failed to run.")
+                print(exc)
+
+        stereo_dl_disp_raw = st.session_state.get("stereo_dl_disp_raw")
+        if stereo_dl_disp_raw is not None:
+            unimatch_depth = _depth_from_disparity(
+                stereo_dl_disp_raw,
+                result.focal_length_px,
+                result.baseline_meters,
+            )
+
     def _render_depth_card(
         column,
         title: str,
@@ -545,8 +594,6 @@ def _render_comparison_panel() -> None:
             st.markdown(f"#### {title}")
             if image is not None:
                 st.image(image, use_container_width=True)
-            else:
-                st.warning("Depth data unavailable.")
 
             min_val, median_val, max_val = _depth_summary(depth_values)
             st.metric("Min Depth", _format_depth_metric(min_val))
@@ -556,7 +603,7 @@ def _render_comparison_panel() -> None:
             if note:
                 st.caption(note)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     _render_depth_card(
         col1,
         "Uncalibrated Stereo",
@@ -575,6 +622,13 @@ def _render_comparison_panel() -> None:
         dl_depth_metric if dl_depth_metric is not None else np.array([], dtype=np.float32),
         _depth_to_colormap(dl_depth_metric) if dl_depth_metric is not None else None,
         note="Depth values are scaled estimates based on stereo calibration and may not be perfectly accurate.",
+    )
+    _render_depth_card(
+        col4,
+        "Stereo DL (Learned Matching)",
+        unimatch_depth if unimatch_depth is not None else np.array([], dtype=np.float32),
+        _depth_to_colormap(unimatch_depth) if unimatch_depth is not None else None,
+        note=unimatch_note if unimatch_depth is not None else None,
     )
 
 
@@ -682,6 +736,9 @@ def _init_state() -> None:
         "upload_signature": None,
         "dl_depth_raw": None,
         "dl_depth_sig": None,
+        "unimatch_disp_raw": None,
+        "unimatch_sig": None,
+        "unimatch_status": None,
         "baseline": 0.10,
         "use_metric_scaling": True,
     }

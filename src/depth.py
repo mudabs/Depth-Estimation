@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import cv2
 import numpy as np
+
+from src.unimatch_depth import compute_unimatch_disparity, load_unimatch_model
 
 
 def compute_sgbm(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -55,8 +59,17 @@ def compute_sgbm(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.nda
 
 
 def compute_unimatch(img1: np.ndarray, img2: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Placeholder for a future UniMatch stereo backend."""
-    raise NotImplementedError("UniMatch disparity is not implemented yet.")
+    """Compute a CREStereo disparity map and a display visualization."""
+    model = _get_cached_unimatch_model()
+    raw = compute_unimatch_disparity(img1, img2, model)
+    disp_norm = cv2.normalize(raw, None, 0, 255, cv2.NORM_MINMAX)
+    return raw.astype(np.float32), disp_norm.astype(np.uint8)
+
+
+@lru_cache(maxsize=1)
+def _get_cached_unimatch_model():
+    """Load the stereo DL model once for non-Streamlit callers."""
+    return load_unimatch_model()
 
 
 def compute_disparity(
