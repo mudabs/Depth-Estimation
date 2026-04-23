@@ -188,7 +188,7 @@ def run_classical_pipeline(
     raw_disparity, disparity_rect = compute_disparity(rect_left, rect_right)
 
     # Disparity: mask invalid pixels and very small disparities before using for depth.
-    invalid_disp_mask = raw_disparity <= 1.0
+    invalid_disp_mask = raw_disparity <= 2.0
     disp_positive = raw_disparity[~invalid_disp_mask]
     if disp_positive.size > 0:
         disparity_min = float(np.min(disp_positive))
@@ -202,7 +202,7 @@ def run_classical_pipeline(
         disparity_valid_pct = 0.0
 
     # Confidence map: white = valid disparity, black = invalid
-    confidence_map = np.where(raw_disparity > 1.0, np.uint8(255), np.uint8(0))
+    confidence_map = np.where(raw_disparity > 2.0, np.uint8(255), np.uint8(0))
 
     points_3d_dense = cv2.reprojectImageTo3D(raw_disparity, Q)
     depth_map = points_3d_dense[:, :, 2].astype(np.float32)
@@ -218,6 +218,7 @@ def run_classical_pipeline(
 
     valid_depth_mask = np.isfinite(depth_map) & (depth_map > 0)
     valid_depth_values = depth_map[valid_depth_mask]
+    valid_depth_values = valid_depth_values[valid_depth_values < 5.0]
 
     # Robust cleaned depth: filter outer 1% of positive depth values
     depth_clean = np.zeros_like(depth_map, dtype=np.float32)
@@ -254,6 +255,7 @@ def run_classical_pipeline(
         depth_hist_bin_centers = np.linspace(0, 1, 20, dtype=np.float32)
     else:
         depth_stats = valid_depth[np.isfinite(valid_depth) & (valid_depth > 0)]
+        depth_stats = depth_stats[depth_stats < 5.0]
         if depth_stats.size > 0:
             stats_cutoff = float(np.percentile(depth_stats, 99))
             filtered_stats = depth_stats[depth_stats < stats_cutoff]

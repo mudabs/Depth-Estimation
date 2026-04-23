@@ -98,14 +98,10 @@ def _depth_values(depth: np.ndarray, *, max_depth: float | None = None) -> np.nd
 
 
 def _depth_summary(depth: np.ndarray) -> tuple[float | None, float | None, float | None]:
-    values = _depth_values(depth, max_depth=None)
+    values = _depth_values(depth, max_depth=5.0)
     if values.size == 0:
         return None, None, None
-    cutoff = float(np.percentile(values, 99))
-    filtered = values[values < cutoff]
-    if filtered.size > 0:
-        values = filtered
-    return float(values.min()), float(values.mean()), float(values.max())
+    return float(values.min()), float(np.median(values)), float(values.max())
 
 
 def _depth_from_disparity(disparity: np.ndarray, focal_length_px: float, baseline_meters: float) -> np.ndarray:
@@ -113,7 +109,7 @@ def _depth_from_disparity(disparity: np.ndarray, focal_length_px: float, baselin
     disp = np.asarray(disparity, dtype=np.float32)
     disparity_safe = disp.copy()
     disparity_safe[~np.isfinite(disparity_safe)] = np.nan
-    disparity_safe[disparity_safe <= 1.0] = np.nan
+    disparity_safe[disparity_safe <= 2.0] = np.nan
     depth = (float(focal_length_px) * float(baseline_meters)) / disparity_safe
     depth[~np.isfinite(depth)] = np.nan
     return depth
@@ -347,10 +343,10 @@ def _render_classical_pipeline_panel() -> None:
     st.subheader("Depth Map")
     calibrated_depth = _depth_from_disparity(result.disparity_map_raw, result.focal_length_px, result.baseline_meters)
     st.image(_depth_to_colormap(calibrated_depth), caption="Calibrated stereo depth", use_container_width=True)
-    calib_min, calib_mean, calib_max = _depth_summary(calibrated_depth)
+    calib_min, calib_median, calib_max = _depth_summary(calibrated_depth)
     depth_cols = st.columns(3)
     depth_cols[0].metric("Min Depth", _format_depth_metric(calib_min))
-    depth_cols[1].metric("Mean Depth", _format_depth_metric(calib_mean))
+    depth_cols[1].metric("Median Depth", _format_depth_metric(calib_median))
     depth_cols[2].metric("Max Depth", _format_depth_metric(calib_max))
 
     # --- Pixel depth query ---
@@ -552,9 +548,9 @@ def _render_comparison_panel() -> None:
             else:
                 st.warning("Depth data unavailable.")
 
-            min_val, mean_val, max_val = _depth_summary(depth_values)
+            min_val, median_val, max_val = _depth_summary(depth_values)
             st.metric("Min Depth", _format_depth_metric(min_val))
-            st.metric("Mean Depth", _format_depth_metric(mean_val))
+            st.metric("Median Depth", _format_depth_metric(median_val))
             st.metric("Max Depth", _format_depth_metric(max_val))
 
             if note:
